@@ -1,0 +1,570 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  onSnapshot, 
+  query, 
+  updateDoc, 
+  deleteDoc,
+  getDoc
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInWithCustomToken, 
+  signInAnonymously, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  Users, Trophy, BarChart3, Plus, Search, ChevronRight, 
+  Trash2, Award, Gamepad2, TrendingUp, FileText, CheckCircle2, 
+  XCircle, Play, LogOut, UserCircle, Lock, KeyRound, 
+  ShieldAlert, BookOpen, ArrowLeft, Settings, Cloud, RefreshCw,
+  Zap, Swords, Sparkles, Eye, EyeOff
+} from 'lucide-react';
+
+// --- Firebase Configuration ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'pearls-class-tracker';
+
+const App = () => {
+  // --- Auth & Sync State ---
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  
+  // --- App Data State ---
+  const [classes, setClasses] = useState([]);
+  const [students, setStudents] = useState([]);
+  const [exams, setExams] = useState([]);
+  const [teacherPassword, setTeacherPassword] = useState('admin123');
+
+  // --- UI State ---
+  const [role, setRole] = useState(null); 
+  const [view, setView] = useState('roster'); 
+  const [activeClass, setActiveClass] = useState(null);
+  const [activeStudent, setActiveStudent] = useState(null);
+  const [authStep, setAuthStep] = useState('role'); 
+  const [authInput, setAuthInput] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [pendingStudent, setPendingStudent] = useState(null);
+
+  // --- Teacher State ---
+  const [selectedClassId, setSelectedClassId] = useState('all');
+  const [isAddingStudent, setIsAddingStudent] = useState(false);
+  const [newStudent, setNewStudent] = useState({ name: '', pin: '', classId: '' });
+  const [newClassName, setNewClassName] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showPins, setShowPins] = useState({});
+
+  // --- Student Settings State ---
+  const [newPinInput, setNewPinInput] = useState('');
+  const [pinChangeStatus, setPinChangeStatus] = useState('');
+
+  // --- Quest State ---
+  const [takingExam, setTakingExam] = useState(null);
+  const [examAnswers, setExamAnswers] = useState({});
+  const [examResult, setExamResult] = useState(null);
+
+  // 1. Handle Authentication (RULE 3)
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth error:", err);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Real-time Data Sync (RULE 1 & 2)
+  useEffect(() => {
+    if (!user) return;
+
+    // Standard Paths
+    const classesRef = collection(db, 'artifacts', appId, 'public', 'data', 'classes');
+    const studentsRef = collection(db, 'artifacts', appId, 'public', 'data', 'students');
+    const examsRef = collection(db, 'artifacts', appId, 'public', 'data', 'exams');
+    const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+
+    const unsubClasses = onSnapshot(classesRef, (snap) => {
+      setClasses(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => console.error("Classes sync error:", err));
+
+    const unsubStudents = onSnapshot(studentsRef, (snap) => {
+      setStudents(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => console.error("Students sync error:", err));
+
+    const unsubExams = onSnapshot(examsRef, (snap) => {
+      setExams(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => console.error("Exams sync error:", err));
+
+    const unsubSettings = onSnapshot(settingsRef, (snap) => {
+      if (snap.exists()) {
+        setTeacherPassword(snap.data().adminPass || 'admin123');
+      }
+    }, (err) => console.error("Settings sync error:", err));
+
+    return () => {
+      unsubClasses();
+      unsubStudents();
+      unsubExams();
+      unsubSettings();
+    };
+  }, [user]);
+
+  // --- Actions ---
+  const saveStudent = async () => {
+    if (!user || !newStudent.name || !newStudent.pin || !newStudent.classId) return;
+    const studentId = `s_${Date.now()}`;
+    const studentData = {
+      ...newStudent,
+      level: 1,
+      score: 0,
+      achievements: [],
+      lastActive: new Date().toISOString()
+    };
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'students', studentId), studentData);
+    setNewStudent({ name: '', pin: '', classId: '' });
+    setIsAddingStudent(false);
+  };
+
+  const updateStudentPin = async (studentId, newPin) => {
+    if (!user || newPin.length !== 4) {
+      setPinChangeStatus('PIN must be 4 digits');
+      return;
+    }
+    const studentRef = doc(db, 'artifacts', appId, 'public', 'data', 'students', studentId);
+    await updateDoc(studentRef, { pin: newPin });
+    setPinChangeStatus('PIN updated successfully!');
+    setNewPinInput('');
+    setTimeout(() => setPinChangeStatus(''), 3000);
+  };
+
+  const createClass = async () => {
+    if (!user || !newClassName.trim()) return;
+    const classId = `c_${Date.now()}`;
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'classes', classId), { name: newClassName });
+    setNewClassName('');
+  };
+
+  const removeStudent = async (id) => {
+    if (!user) return;
+    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'students', id));
+  };
+
+  const updateStudentProgress = async (studentId, xpGained) => {
+    if (!user) return;
+    const studentRef = doc(db, 'artifacts', appId, 'public', 'data', 'students', studentId);
+    const sDoc = await getDoc(studentRef);
+    if (sDoc.exists()) {
+      const current = sDoc.data();
+      const newScore = (current.score || 0) + xpGained;
+      const newLevel = Math.floor(newScore / 500) + 1;
+      await updateDoc(studentRef, {
+        score: newScore,
+        level: Math.max(current.level || 1, newLevel),
+        lastActive: new Date().toISOString()
+      });
+    }
+  };
+
+  // --- Auth Handlers ---
+  const handleTeacherLogin = () => {
+    if (authInput === teacherPassword) {
+      setRole('teacher');
+      setAuthStep('dashboard');
+      setAuthInput('');
+      setAuthError('');
+    } else {
+      setAuthError('Access Denied');
+    }
+  };
+
+  const handleStudentLogin = () => {
+    if (!pendingStudent) return;
+    if (authInput === pendingStudent.pin) {
+      setRole('student');
+      setActiveStudent(pendingStudent);
+      setAuthStep('dashboard');
+      setView('exams');
+      setAuthInput('');
+      setAuthError('');
+    } else {
+      setAuthError('Incorrect PIN');
+    }
+  };
+
+  const handleSubmitExam = async () => {
+    if (!takingExam) return;
+    let correctCount = 0;
+    takingExam.questions.forEach((q, idx) => {
+      if (examAnswers[idx] === q.correct) correctCount++;
+    });
+    const passed = correctCount === takingExam.questions.length;
+    setExamResult({ score: correctCount, total: takingExam.questions.length, passed });
+
+    if (passed && activeStudent) {
+      await updateStudentProgress(activeStudent.id, takingExam.xpReward);
+    }
+  };
+
+  const filteredStudents = useMemo(() => {
+    return students.filter(s => {
+      const matchSearch = s.name?.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchClass = selectedClassId === 'all' || s.classId === selectedClassId;
+      return matchSearch && matchClass;
+    });
+  }, [students, searchQuery, selectedClassId]);
+
+  if (loading) return (
+    <div className="min-h-screen bg-emerald-50 flex items-center justify-center">
+      <div className="text-center animate-pulse">
+        <RefreshCw className="w-12 h-12 text-emerald-600 animate-spin mx-auto mb-4" />
+        <p className="font-black text-emerald-800 uppercase tracking-widest">Loading...</p>
+      </div>
+    </div>
+  );
+
+  if (authStep !== 'dashboard') {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="max-w-md w-full p-8 bg-white rounded-3xl shadow-2xl border border-emerald-100">
+          <div className="text-center mb-8">
+            <Sparkles className="w-12 h-12 text-emerald-600 mx-auto mb-2" />
+            <h2 className="text-2xl font-black text-slate-800 tracking-tight">Pearl's Class</h2>
+          </div>
+
+          {authStep === 'role' && (
+            <div className="space-y-4">
+              <button onClick={() => setAuthStep('teacher-login')} className="w-full py-4 bg-emerald-600 text-white rounded-xl font-bold flex items-center justify-center gap-2">
+                <ShieldAlert size={20} /> Teacher Portal
+              </button>
+              <button onClick={() => setAuthStep('class-select')} className="w-full py-4 border-2 border-blue-100 text-blue-600 rounded-xl font-bold">
+                Student Login
+              </button>
+            </div>
+          )}
+
+          {authStep === 'teacher-login' && (
+            <div className="space-y-4">
+              <button onClick={() => setAuthStep('role')} className="text-slate-400 flex items-center gap-1 text-sm font-bold"><ArrowLeft size={16}/> Back</button>
+              <h3 className="font-black text-xl text-slate-800">Teacher Login</h3>
+              <input autoFocus type="password" placeholder="Admin Key" className="w-full p-3 rounded-xl border-2 border-slate-200 outline-none focus:ring-2 focus:ring-emerald-500" value={authInput} onChange={(e) => setAuthInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleTeacherLogin()}/>
+              {authError && <p className="text-red-500 text-xs font-bold">{authError}</p>}
+              <button onClick={handleTeacherLogin} className="w-full py-3 bg-emerald-600 text-white rounded-xl font-bold">Access Dashboard</button>
+            </div>
+          )}
+
+          {authStep === 'class-select' && (
+            <div className="space-y-4">
+              <button onClick={() => setAuthStep('role')} className="text-slate-400 flex items-center gap-1 text-sm font-bold"><ArrowLeft size={16}/> Back</button>
+              <h3 className="font-black text-xl text-slate-800">Select Class</h3>
+              <div className="grid gap-2 max-h-64 overflow-y-auto">
+                {classes.map(c => (
+                  <button key={c.id} onClick={() => { setActiveClass(c); setAuthStep('student-select'); }} className="p-4 border-2 border-slate-100 rounded-xl text-left font-bold flex items-center justify-between">
+                    <span>{c.name}</span> <ChevronRight size={18} />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {authStep === 'student-select' && (
+            <div className="space-y-4">
+              <button onClick={() => setAuthStep('class-select')} className="text-slate-400 flex items-center gap-1 text-sm font-bold"><ArrowLeft size={16}/> Back</button>
+              <h3 className="font-black text-xl text-slate-800">Select Student</h3>
+              <div className="grid gap-2 max-h-64 overflow-y-auto">
+                {students.filter(s => s.classId === activeClass?.id).map(s => (
+                  <button key={s.id} onClick={() => { setPendingStudent(s); setAuthStep('student-pin'); }} className="p-4 border-2 border-slate-100 rounded-xl text-left font-bold flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-600 flex items-center justify-center text-xs font-black">{s.name.charAt(0)}</div>
+                    <span>{s.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {authStep === 'student-pin' && (
+            <div className="space-y-4">
+              <button onClick={() => setAuthStep('student-select')} className="text-slate-400 flex items-center gap-1 text-sm font-bold"><ArrowLeft size={16}/> Back</button>
+              <h3 className="font-black text-xl text-slate-800">{pendingStudent?.name}</h3>
+              <input autoFocus type="password" maxLength={4} placeholder="PIN" className="w-full text-center text-3xl tracking-[1em] p-4 rounded-xl border-2 border-slate-200 outline-none" value={authInput} onChange={(e) => setAuthInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleStudentLogin()}/>
+              {authError && <p className="text-red-500 text-xs font-bold text-center">{authError}</p>}
+              <button onClick={handleStudentLogin} className="w-full py-4 bg-blue-600 text-white rounded-xl font-bold">Login</button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-4 md:p-8">
+      <div className="max-w-6xl mx-auto">
+        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8 bg-white p-4 rounded-3xl border border-slate-100 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-gradient-to-br from-emerald-500 to-blue-600 rounded-2xl text-white"><Sparkles size={24} /></div>
+            <h1 className="text-lg font-black text-slate-800">Pearl's Class</h1>
+          </div>
+          
+          <div className="flex items-center gap-2">
+            <div className="flex bg-slate-100 p-1 rounded-2xl">
+              {role === 'teacher' ? (
+                <>
+                  <button onClick={() => setView('roster')} className={`px-4 py-2 rounded-xl text-xs font-black uppercase ${view === 'roster' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-400'}`}>Students</button>
+                  <button onClick={() => setView('config')} className={`px-4 py-2 rounded-xl text-xs font-black uppercase ${view === 'config' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-400'}`}>Classes</button>
+                </>
+              ) : (
+                <>
+                  <button onClick={() => setView('exams')} className={`px-4 py-2 rounded-xl text-xs font-black uppercase ${view === 'exams' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>Missions</button>
+                  <button onClick={() => setView('rankings')} className={`px-4 py-2 rounded-xl text-xs font-black uppercase ${view === 'rankings' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>Leaderboard</button>
+                  <button onClick={() => setView('settings')} className={`px-4 py-2 rounded-xl text-xs font-black uppercase ${view === 'settings' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>Settings</button>
+                </>
+              )}
+            </div>
+            <button onClick={() => window.location.reload()} className="p-2 text-slate-300 hover:text-red-400"><LogOut size={20}/></button>
+          </div>
+        </header>
+
+        {role === 'teacher' ? (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <div className="lg:col-span-2 space-y-4">
+              <div className="flex gap-2">
+                <select value={selectedClassId} onChange={e => setSelectedClassId(e.target.value)} className="p-3 bg-white border border-slate-100 rounded-2xl font-bold text-sm outline-none focus:ring-2 focus:ring-emerald-500">
+                  <option value="all">All Classes</option>
+                  {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                <div className="relative flex-1">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <input type="text" placeholder="Search students..." className="w-full pl-12 pr-4 py-3 rounded-2xl border border-slate-100 outline-none focus:ring-2 focus:ring-emerald-500" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+                </div>
+                <button onClick={() => setIsAddingStudent(true)} className="bg-emerald-600 text-white px-6 py-3 rounded-2xl font-black flex items-center gap-2"><Plus size={18}/> New Student</button>
+              </div>
+
+              {isAddingStudent && (
+                <div className="p-6 bg-white border border-emerald-100 rounded-[2rem] shadow-xl">
+                  <h4 className="font-black text-emerald-700 mb-4 flex items-center gap-2"><Zap size={18}/> Add New Student</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <input type="text" placeholder="Full Name" className="p-3 border border-slate-100 rounded-xl" value={newStudent.name} onChange={e => setNewStudent({...newStudent, name: e.target.value})} />
+                    <input type="text" placeholder="4-Digit PIN" maxLength={4} className="p-3 border border-slate-100 rounded-xl" value={newStudent.pin} onChange={e => setNewStudent({...newStudent, pin: e.target.value})} />
+                    <select className="p-3 border border-slate-100 rounded-xl" value={newStudent.classId} onChange={e => setNewStudent({...newStudent, classId: e.target.value})}>
+                      <option value="">Select Class...</option>
+                      {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="mt-4 flex gap-2">
+                    <button onClick={saveStudent} className="bg-emerald-600 text-white px-6 py-2 rounded-xl font-black">Save Student</button>
+                    <button onClick={() => setIsAddingStudent(false)} className="text-slate-400 font-bold px-4 py-2">Cancel</button>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid gap-2">
+                {filteredStudents.map(s => (
+                  <div key={s.id} className="p-4 bg-white border border-slate-50 rounded-2xl flex items-center justify-between hover:border-emerald-200 transition-all">
+                    <div className="flex items-center gap-4">
+                      <div className="w-12 h-12 rounded-2xl bg-slate-50 text-emerald-600 flex items-center justify-center font-black text-xl">{s.name?.charAt(0)}</div>
+                      <div>
+                        <p className="font-black text-slate-800">{s.name}</p>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-blue-500 font-black uppercase">{classes.find(c => c.id === s.classId)?.name}</span>
+                          <span className="text-[10px] text-slate-300">•</span>
+                          <button onClick={() => setShowPins({...showPins, [s.id]: !showPins[s.id]})} className="flex items-center gap-1 text-[10px] font-black text-slate-400 hover:text-emerald-500">
+                            {showPins[s.id] ? <EyeOff size={10}/> : <Eye size={10}/>}
+                            PIN: {showPins[s.id] ? s.pin : '****'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-8">
+                      <div className="text-right">
+                        <p className="text-xs font-black text-emerald-600 uppercase">LVL {s.level}</p>
+                        <p className="text-[10px] font-black text-slate-400">{s.score} XP</p>
+                      </div>
+                      <button onClick={() => removeStudent(s.id)} className="text-slate-200 hover:text-red-500"><Trash2 size={18}/></button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              <div className="p-6 bg-gradient-to-br from-emerald-600 to-blue-700 rounded-[2rem] text-white shadow-xl">
+                <h4 className="font-black text-lg mb-4 flex items-center gap-2"><Trophy className="text-yellow-300"/> Stats</h4>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="p-4 bg-white/10 rounded-2xl text-center">
+                    <p className="text-[10px] font-black uppercase opacity-60">Students</p>
+                    <p className="text-3xl font-black">{students.length}</p>
+                  </div>
+                  <div className="p-4 bg-white/10 rounded-2xl text-center">
+                    <p className="text-[10px] font-black uppercase opacity-60">Classes</p>
+                    <p className="text-3xl font-black">{classes.length}</p>
+                  </div>
+                </div>
+              </div>
+              
+              {view === 'config' && (
+                <div className="p-6 bg-white border border-slate-100 rounded-[2rem]">
+                  <h4 className="font-black text-lg mb-4 text-slate-800">Classes</h4>
+                  <div className="flex gap-2 mb-4">
+                    <input type="text" placeholder="Class Name" className="flex-1 p-3 border border-slate-100 rounded-xl" value={newClassName} onChange={e => setNewClassName(e.target.value)} />
+                    <button onClick={createClass} className="p-3 bg-emerald-600 text-white rounded-xl"><Plus size={20}/></button>
+                  </div>
+                  <div className="space-y-2">
+                    {classes.map(c => (
+                      <div key={c.id} className="p-3 bg-slate-50 rounded-xl text-xs font-black flex justify-between items-center group">
+                        {c.name}
+                        <button onClick={() => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'classes', c.id))} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100"><Trash2 size={16}/></button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <div className="p-10 bg-gradient-to-r from-blue-700 to-emerald-500 rounded-[3rem] text-white shadow-2xl relative overflow-hidden">
+              <div className="relative z-10">
+                <h2 className="text-5xl font-black tracking-tight mb-6">{activeStudent?.name}</h2>
+                <div className="flex gap-10">
+                  <div>
+                    <p className="text-[10px] font-black opacity-60 uppercase">Level</p>
+                    <p className="text-4xl font-black">{students.find(s => s.id === activeStudent?.id)?.level || 1}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-black opacity-60 uppercase">Total XP</p>
+                    <p className="text-4xl font-black">{students.find(s => s.id === activeStudent?.id)?.score || 0}</p>
+                  </div>
+                </div>
+              </div>
+              <Swords size={160} className="absolute -right-10 bottom-0 opacity-10 -rotate-12" />
+            </div>
+
+            {view === 'settings' ? (
+              <div className="max-w-md mx-auto bg-white rounded-[2.5rem] p-8 border border-slate-100 shadow-sm">
+                <div className="flex items-center gap-3 mb-8">
+                  <KeyRound className="text-blue-500" size={24} />
+                  <h3 className="text-2xl font-black text-slate-800">Security Settings</h3>
+                </div>
+                
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-xs font-black text-slate-400 uppercase mb-2">Change Your 4-Digit PIN</label>
+                    <div className="flex gap-2">
+                      <input 
+                        type="password" 
+                        maxLength={4} 
+                        placeholder="New PIN" 
+                        className="flex-1 p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl text-center text-2xl font-bold tracking-[0.5em] outline-none focus:border-blue-500 transition-colors"
+                        value={newPinInput}
+                        onChange={(e) => setNewPinInput(e.target.value)}
+                      />
+                      <button 
+                        onClick={() => updateStudentPin(activeStudent?.id, newPinInput)}
+                        className="bg-blue-600 text-white px-6 rounded-2xl font-black hover:bg-blue-700 transition-colors"
+                      >
+                        Update
+                      </button>
+                    </div>
+                    {pinChangeStatus && (
+                      <p className={`mt-3 text-xs font-bold text-center ${pinChangeStatus.includes('successfully') ? 'text-emerald-500' : 'text-red-500'}`}>
+                        {pinChangeStatus}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="pt-6 border-t border-slate-50 text-center">
+                    <p className="text-[10px] font-black text-slate-300 uppercase leading-relaxed">
+                      Choose a PIN you can remember. <br/> If you lose it, your teacher can reset it for you.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : view === 'exams' ? (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {exams.map(ex => (
+                  <div key={ex.id} className="p-8 bg-white border border-slate-100 rounded-[2.5rem] hover:shadow-2xl transition-all cursor-pointer group" onClick={() => setTakingExam(ex)}>
+                    <Play size={24} className="text-emerald-600 mb-6" />
+                    <h3 className="text-2xl font-black text-slate-800 mb-2">{ex.title}</h3>
+                    <p className="text-[10px] text-emerald-500 font-black uppercase">+{ex.xpReward} XP Available</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="bg-white rounded-[2.5rem] p-10 border border-slate-100 shadow-sm">
+                <h3 className="text-3xl font-black text-slate-800 mb-10 flex items-center gap-3">
+                  <Trophy className="text-yellow-500" /> Class Ranking
+                </h3>
+                <div className="space-y-4">
+                  {students.filter(s => s.classId === activeStudent?.classId).sort((a,b) => b.score - a.score).map((s, idx) => (
+                    <div key={s.id} className={`flex items-center gap-6 p-6 rounded-[2rem] ${s.id === activeStudent?.id ? 'bg-emerald-50 border-2 border-emerald-500' : 'bg-slate-50'}`}>
+                      <span className="w-10 text-2xl font-black text-slate-300">#{idx+1}</span>
+                      <div className="w-14 h-14 rounded-2xl bg-white flex items-center justify-center font-black text-2xl text-blue-600 border border-slate-100">{s.name?.charAt(0)}</div>
+                      <div className="flex-1 font-black text-xl text-slate-800">{s.name}</div>
+                      <div className="text-right">
+                        <p className="text-2xl font-black text-emerald-600">{s.score} <span className="text-sm opacity-60 font-bold">XP</span></p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {takingExam && (
+          <div className="fixed inset-0 bg-slate-900/90 backdrop-blur-md z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-[2.5rem] p-8 max-w-xl w-full shadow-2xl border-4 border-emerald-500">
+              {!examResult ? (
+                <>
+                  <div className="flex justify-between items-center mb-6">
+                    <h2 className="text-2xl font-black text-slate-800">{takingExam.title}</h2>
+                    <span className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-xs font-black">{takingExam.xpReward} XP</span>
+                  </div>
+                  {takingExam.questions?.map((q, idx) => (
+                    <div key={idx} className="mb-6">
+                      <p className="font-bold text-slate-700 mb-3">{q.q}</p>
+                      <div className="grid gap-2">
+                        {q.options?.map((opt, oIdx) => (
+                          <button key={oIdx} onClick={() => setExamAnswers({...examAnswers, [idx]: oIdx})} className={`p-4 rounded-2xl border-2 text-left font-bold transition-all ${examAnswers[idx] === oIdx ? 'border-emerald-600 bg-emerald-50 text-emerald-700' : 'border-slate-100 text-slate-500'}`}>{opt}</button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  <button onClick={handleSubmitExam} className="w-full py-5 bg-emerald-600 text-white rounded-[1.5rem] font-black text-lg">Finish Mission</button>
+                </>
+              ) : (
+                <div className="text-center py-6">
+                  <div className={`w-24 h-24 rounded-full mx-auto mb-6 flex items-center justify-center ${examResult.passed ? 'bg-emerald-100 text-emerald-600' : 'bg-red-100 text-red-600'}`}>
+                    {examResult.passed ? <Award size={48}/> : <XCircle size={48}/>}
+                  </div>
+                  <h3 className="text-4xl font-black mb-2 text-slate-800">{examResult.passed ? 'SUCCESS!' : 'FAILED'}</h3>
+                  <p className="text-slate-500 font-bold mb-8">Score: {examResult.score}/{examResult.total}</p>
+                  <button onClick={() => {setTakingExam(null); setExamResult(null);}} className="px-12 py-4 bg-slate-900 text-white rounded-2xl font-black">Close</button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default App;
